@@ -5,7 +5,7 @@ import altair as alt
 # ---------------- 기본 설정 ----------------
 st.set_page_config(page_title="함창고 입시결과 대시보드", layout="wide")
 st.title("함창고 입시결과 검색 · 시각화 툴 v2")
-st.caption("※ 내부 참고용 · 학생 개인정보는 가급적 익명(ID)으로 관리하세요.")
+st.caption("※ 내부 참고용 · 상담 활용시 학생 개인정보는 가급적 숨기고 활용하시기 바랍니다.")
 
 
 # ---------------- 1. 데이터 불러오기 + 전처리 ----------------
@@ -20,7 +20,7 @@ def load_data():
     # 2) 열 이름 정리 (엑셀 열 이름과 다르면 오른쪽만 실제 이름에 맞게 고쳐 주세요)
     df = df.rename(
         columns={
-            "졸업년도": "졸업년도",
+            "졸업년도": "卒업년도",
             "출신중": "출신중",
             "성명": "성명",
             "내신(중)": "중학교내신",
@@ -31,6 +31,10 @@ def load_data():
             "주요 합격 대학/전형/학과": "주요합격",
         }
     )
+
+    # 혹시 위에서 "졸업년도"를 잘못 바꿨다면 아래 줄을 "졸업년도"로 다시 맞춥니다.
+    if "卒업년도" in df.columns and "졸업년도" not in df.columns:
+        df = df.rename(columns={"卒업년도": "졸업년도"})
 
     # 3) 숫자형 변환
     for col in ["졸업년도", "중학교내신", "고교내신", "고입석차", "고등학교석차"]:
@@ -259,6 +263,19 @@ if "출신중" in df.columns:
 else:
     selected_middle = "전체"
 
+# ✅ 대표대학(주요 4년제 위주) 필터 추가
+if "대표대학" in df.columns:
+    uni_counts = df["대표대학"].dropna().value_counts()
+    major_universities = uni_counts.head(30).index.tolist()  # 상위 30개 대학
+    selected_universities = st.sidebar.multiselect(
+        "대표 대학 (주요 4년제 위주)",
+        options=major_universities,
+        default=major_universities,
+        help="우리 학교에서 합격자가 많은 상위 4년제 대학 위주의 목록입니다. (복수 선택 가능)",
+    )
+else:
+    selected_universities = []
+
 # 고교 내신
 if "고교내신" in df.columns and df["고교내신"].notna().any():
     min_grade = float(df["고교내신"].min())
@@ -301,7 +318,7 @@ keyword = st.sidebar.text_input(
     value="",
 )
 
-# 대학 그룹 필터 (수도권, 국립, 의치약한수, 간호, 교대, 농어촌)
+# 대학/전형 그룹 필터 (수도권, 국립, 의치약한수, 간호, 교대, 농어촌)
 st.sidebar.markdown("### 대학/전형 그룹 필터")
 group_filter = st.sidebar.multiselect(
     "아래 그룹 중 포함하고 싶은 것 선택 (복수 선택 가능)",
@@ -322,6 +339,10 @@ if year_range and "졸업년도" in filtered.columns:
 # 중학교
 if selected_middle != "전체":
     filtered = filtered[filtered["출신중"] == selected_middle]
+
+# ✅ 대표대학 필터
+if selected_universities:
+    filtered = filtered[filtered["대표대학"].isin(selected_universities)]
 
 # 고교 내신
 if grade_range and "고교내신" in filtered.columns:
@@ -560,10 +581,10 @@ with tab5:
     st.dataframe(df.head())
 
 
-# ---------------- 5. 화면 우측 하단 '만든이' 표시 ----------------
+# ---------------- 5. 화면 좌측 하단 '만든이' 표시 ----------------
 st.markdown(
     """
-    <div style="position: fixed; bottom: 10px; right: 10px; 
+    <div style="position: fixed; bottom: 10px; left: 10px; 
                 font-size: 0.9rem; color: gray; background-color: rgba(255,255,255,0.7);
                 padding: 4px 8px; border-radius: 4px;">
         만든이: 함창고 교사 박호종
