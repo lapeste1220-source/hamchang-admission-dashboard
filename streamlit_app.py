@@ -17,7 +17,7 @@ def load_data():
     except UnicodeDecodeError:
         df = pd.read_csv("admission_results.csv", encoding="euc-kr")
 
-    # 2) 열 이름 정리 (엑셀 열 이름과 다르면 오른쪽만 바꿔 주세요)
+    # 2) 열 이름 정리 (엑셀 열 이름과 다르면 오른쪽만 실제 이름에 맞게 고쳐 주세요)
     df = df.rename(
         columns={
             "졸업년도": "졸업년도",
@@ -107,7 +107,7 @@ def load_data():
 
     df["학과계열"] = df["대표학과"].apply(classify_major_group)
 
-    # 7) 대학 그룹(수도권/국립/교대/의치약한수/간호) 플래그
+    # 7) 대학 그룹(수도권/국립/교대) 플래그
     CAPITAL_REGION_UNIS = [
         "서울대학교", "연세대학교", "고려대학교",
         "성균관대학교", "한양대학교", "서강대학교",
@@ -130,27 +130,100 @@ def load_data():
         "진주교육대학교", "제주교육대학교"
     ]
 
-    MED_KEYWORDS = ["의학", "의예", "치의", "치과", "약학", "한의", "수의"]
-    NURSING_KEYWORDS = ["간호"]
-
     df["수도권대학"] = df["대표대학"].isin(CAPITAL_REGION_UNIS)
     df["국립대학"] = df["대표대학"].isin(NATIONAL_UNIS)
-    df["교대"] = df["대표대학"].isin(TEACHER_UNIS)
+
+    def is_teacher_univ(name):
+        """대학 이름에 '교대' 또는 '교육대'가 들어가면 교대로 인식"""
+        if not isinstance(name, str):
+            return False
+        if ("교대" in name) or ("교육대" in name):
+            return True
+        return name in TEACHER_UNIS
+
+    df["교대"] = df["대표대학"].apply(is_teacher_univ)
+
+    # 8) 의치약한수, 간호 판별 (키워드 확장)
+    MED_KEYWORDS = [
+        "의예", "의학", "의학부",
+        "치의", "치의예", "치의학",
+        "약학", "신약",
+        "한의", "한의예", "한의학", "한의약",
+        "수의", "수의예", "수의학"
+    ]
+    NURSING_KEYWORDS = ["간호"]
 
     def is_med_major(major):
         if not isinstance(major, str):
             return False
-        return any(k in major for k in MED_KEYWORDS)
+        text = major.replace(" ", "").strip()
+        return any(keyword in text for keyword in MED_KEYWORDS)
 
     def is_nursing_major(major):
         if not isinstance(major, str):
             return False
-        return any(k in major for k in NURSING_KEYWORDS)
+        text = major.replace(" ", "").strip()
+        return any(keyword in text for keyword in NURSING_KEYWORDS)
 
     df["의치약한수"] = df["대표학과"].apply(is_med_major)
     df["간호"] = df["대표학과"].apply(is_nursing_major)
 
-    # 8) 합격여부 컬럼이 없으면, '주요합격'이 비어있지 않으면 합격으로 가정
+    # 8-1) 의치약한수 세부 카테고리 (의대/치대/약대/한의대/수의대)
+    def is_med_school(major):
+        if not isinstance(major, str):
+            return False
+        text = major.replace(" ", "").strip()
+        # '의예', '의학', '의학부'가 들어가고 치의/한의/수의는 제외
+        if any(k in text for k in ["의예", "의학", "의학부"]):
+            if not any(k in text for k in ["치의", "한의", "수의"]):
+                return True
+        return False
+
+    def is_dent_school(major):
+        if not isinstance(major, str):
+            return False
+        text = major.replace(" ", "").strip()
+        return "치의" in text or "치의예" in text or "치의학" in text
+
+    def is_pharm_school(major):
+        if not isinstance(major, str):
+            return False
+        text = major.replace(" ", "").strip()
+        return ("약학" in text) or ("신약" in text)
+
+    def is_korean_med_school(major):
+        if not isinstance(major, str):
+            return False
+        text = major.replace(" ", "").strip()
+        return ("한의" in text) or ("한의예" in text) or ("한의학" in text) or ("한의약" in text)
+
+    def is_vet_school(major):
+        if not isinstance(major, str):
+            return False
+        text = major.replace(" ", "").strip()
+        return ("수의" in text) or ("수의예" in text) or ("수의학" in text)
+
+    df["의대"] = df["대표학과"].apply(is_med_school)
+    df["치대"] = df["대표학과"].apply(is_dent_school)
+    df["약대"] = df["대표학과"].apply(is_pharm_school)
+    df["한의대"] = df["대표학과"].apply(is_korean_med_school)
+    df["수의대"] = df["대표학과"].apply(is_vet_school)
+
+    # 9) 농어촌 전형 플래그
+    def is_rural_from_text(text):
+        if not isinstance(text, str):
+            return False
+        return "농어촌" in text
+
+    df["농어촌"] = df.apply(
+        lambda row: (
+            is_rural_from_text(row.get("전형유형원문", None)) or
+            is_rural_from_text(row.get("주요합격", None))
+        ),
+        axis=1
+    )
+
+    # 10) 합격여부 컬럼이 없으면, '주요합격'이 비어있지 않으면 합격으로 가정
     if "합격여부" not in df.columns:
         df["합격여부"] = df["주요합격"].apply(
             lambda x: "합격" if isinstance(x, str) and x.strip() else "미상"
@@ -208,18 +281,33 @@ selected_type = st.sidebar.selectbox("전형 대분류", type_options)
 major_group_options = ["전체"] + sorted(df["학과계열"].dropna().unique().tolist())
 selected_major_group = st.sidebar.selectbox("학과 계열", major_group_options)
 
+# 의치약한수 세부 선택
+med_view_option = st.sidebar.selectbox(
+    "의치약한수 분류 필터",
+    [
+        "제한 없음",
+        "의치약한수만(전체)",
+        "의대만",
+        "치대만",
+        "약대만",
+        "한의대만",
+        "수의대만",
+    ],
+)
+
 # 대학/학과 키워드
 keyword = st.sidebar.text_input(
     "대학/전형/학과 키워드 (예: 서울대, 의학, 간호, 교대 등)",
     value="",
 )
 
-# 대학 그룹 필터 (수도권, 국립, 의치약한수, 간호, 교대)
-st.sidebar.markdown("### 대학 그룹 필터")
+# 대학 그룹 필터 (수도권, 국립, 의치약한수, 간호, 교대, 농어촌)
+st.sidebar.markdown("### 대학/전형 그룹 필터")
 group_filter = st.sidebar.multiselect(
     "아래 그룹 중 포함하고 싶은 것 선택 (복수 선택 가능)",
-    options=["수도권대학", "국립대학", "의치약한수", "간호", "교대"],
+    options=["수도권대학", "국립대학", "의치약한수", "간호", "교대", "농어촌"],
 )
+
 
 # ---------------- 3. 필터 적용 ----------------
 filtered = df.copy()
@@ -250,11 +338,26 @@ if selected_type != "전체":
 if selected_major_group != "전체":
     filtered = filtered[filtered["학과계열"] == selected_major_group]
 
+# 의치약한수 세부 필터
+if med_view_option == "의치약한수만(전체)":
+    filtered = filtered[filtered["의치약한수"] == True]
+elif med_view_option == "의대만":
+    filtered = filtered[filtered["의대"] == True]
+elif med_view_option == "치대만":
+    filtered = filtered[filtered["치대"] == True]
+elif med_view_option == "약대만":
+    filtered = filtered[filtered["약대"] == True]
+elif med_view_option == "한의대만":
+    filtered = filtered[filtered["한의대"] == True]
+elif med_view_option == "수의대만":
+    filtered = filtered[filtered["수의대"] == True]
+# "제한 없음"이면 아무 것도 하지 않음
+
 # 키워드 (주요합격 안에서 검색)
 if keyword and "주요합격" in filtered.columns:
     filtered = filtered[filtered["주요합격"].fillna("").str.contains(keyword)]
 
-# 대학 그룹 필터 (선택한 항목 중 하나라도 True이면 통과)
+# 대학/전형 그룹 필터 (선택한 항목 중 하나라도 True이면 통과)
 if group_filter:
     mask = pd.Series(False, index=filtered.index)
     for g in group_filter:
