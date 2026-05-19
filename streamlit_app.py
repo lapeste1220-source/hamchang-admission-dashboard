@@ -2,10 +2,44 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
+
 # ---------------- 기본 설정 ----------------
 st.set_page_config(page_title="함창고 입시결과 대시보드", layout="wide")
+
 st.title("함창고 입시결과 검색 · 시각화 툴 v2")
 st.caption("※ 내부 참고용 · 상담 활용시 학생 개인정보는 가급적 숨기고 활용하시기 바랍니다.")
+
+
+# ---------------- 유틸 함수 ----------------
+def normalize_col_name(col):
+    """컬럼명 비교용 정규화"""
+    return (
+        str(col)
+        .replace("\n", "")
+        .replace("\r", "")
+        .replace(" ", "")
+        .strip()
+    )
+
+
+def first_existing_column(df, candidates):
+    """후보 컬럼명 중 실제 df에 존재하는 첫 번째 컬럼명 반환"""
+    normalized_map = {normalize_col_name(c): c for c in df.columns}
+
+    for cand in candidates:
+        key = normalize_col_name(cand)
+        if key in normalized_map:
+            return normalized_map[key]
+
+    return None
+
+
+def safe_to_numeric(series):
+    """문자열 안 숫자만 추출해서 숫자형 변환"""
+    return pd.to_numeric(
+        series.astype(str).str.extract(r"(\d+\.?\d*)")[0],
+        errors="coerce"
+    )
 
 
 # ---------------- 1. 데이터 불러오기 + 전처리 ----------------
@@ -17,139 +51,161 @@ def load_data():
     except UnicodeDecodeError:
         df = pd.read_csv("admission_results.csv", encoding="euc-kr")
 
-    # 2) 컬럼명 기본 정리
-    # - 앞뒤 공백 제거
-    # - 줄바꿈 제거
+    # 2) 원본 컬럼명 기본 정리
     df.columns = (
         df.columns.astype(str)
         .str.replace("\n", "", regex=False)
+        .str.replace("\r", "", regex=False)
         .str.strip()
     )
 
-    # 3) 컬럼명 표준화
-    # CSV 파일마다 약간 다른 컬럼명을 하나의 이름으로 통일
-    rename_map = {}
-
-    for col in df.columns:
-        compact = (
-            str(col)
-            .replace(" ", "")
-            .replace("\n", "")
-            .replace("\r", "")
-            .strip()
-        )
-
-        if compact in ["졸업년도", "졸업연도"]:
-            rename_map[col] = "졸업년도"
-
-        elif compact in ["출신중", "출신중학교"]:
-            rename_map[col] = "출신중"
-
-        elif compact in ["성명", "이름", "학생명"]:
-            rename_map[col] = "성명"
-
-        elif compact in ["내신(중)", "중학교내신", "중학교내신성적", "중학교성적"]:
-            rename_map[col] = "중학교내신"
-
-        elif compact in ["내신(고)", "고교내신", "고등학교내신", "고등학교내신성적"]:
-            rename_map[col] = "고교내신"
-
-        elif compact in ["고입석차", "고입석차등급"]:
-            rename_map[col] = "고입석차"
-
-        elif compact in ["고등학교석차", "고등학교석차등급"]:
-            rename_map[col] = "고등학교석차"
-
-        elif compact in [
+    # 3) 주요 컬럼 자동 인식
+    col_graduation = first_existing_column(df, ["졸업년도", "졸업연도"])
+    col_middle = first_existing_column(df, ["출신중", "출신중학교"])
+    col_name = first_existing_column(df, ["성명", "이름", "학생명"])
+    col_middle_grade = first_existing_column(df, ["내신(중)", "중학교내신", "중학교 내신", "중학교내신성적"])
+    col_high_grade = first_existing_column(df, ["내신(고)", "고교내신", "고교 내신", "고등학교내신", "고등학교 내신"])
+    col_middle_rank = first_existing_column(df, ["고입석차", "고입 석차"])
+    col_high_rank = first_existing_column(df, ["고등학교석차", "고등학교 석차", "고등학교\n석차"])
+    col_offer = first_existing_column(
+        df,
+        [
+            "주요 합격 대학/전형/학과",
             "주요합격대학/전형/학과",
             "주요합격",
             "합격대학/전형/학과",
             "대학/전형/학과",
-            "주요합격대학전형학과",
-            "주요합격대학",
-        ]:
-            rename_map[col] = "주요합격"
+            "주요 합격",
+        ],
+    )
+    col_final_stage = first_existing_column(df, ["최종단계", "최종 단계", "최종결과", "합격결과"])
+    col_admission_name = first_existing_column(df, ["전형명", "세부전형명", "전형 이름"])
+    col_admission_method = first_existing_column(df, ["전형방법", "전형 방법", "방법"])
 
-        elif compact in ["최종단계", "최종결과", "합격결과"]:
-            rename_map[col] = "최종단계"
+    # 4) 표준 컬럼 생성
+    if col_graduation:
+        df["졸업년도"] = df[col_graduation]
+    else:
+        df["졸업년도"] = None
 
-        elif compact in ["전형명", "세부전형명"]:
-            rename_map[col] = "전형명"
+    if col_middle:
+        df["출신중"] = df[col_middle]
+    else:
+        df["출신중"] = None
 
-        elif compact in ["전형방법", "방법"]:
-            rename_map[col] = "전형방법"
+    if col_name:
+        df["성명"] = df[col_name]
+    else:
+        df["성명"] = None
 
-    df = df.rename(columns=rename_map)
+    if col_middle_grade:
+        df["중학교내신"] = df[col_middle_grade]
+    else:
+        df["중학교내신"] = None
 
-    # 4) 필수 컬럼 안전장치
-    required_cols = [
-        "졸업년도",
-        "출신중",
-        "성명",
-        "중학교내신",
-        "고교내신",
-        "고입석차",
-        "고등학교석차",
-        "주요합격",
-    ]
+    if col_high_grade:
+        df["고교내신"] = df[col_high_grade]
+    else:
+        df["고교내신"] = None
 
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = None
+    if col_middle_rank:
+        df["고입석차"] = df[col_middle_rank]
+    else:
+        df["고입석차"] = None
+
+    if col_high_rank:
+        df["고등학교석차"] = df[col_high_rank]
+    else:
+        df["고등학교석차"] = None
+
+    if col_offer:
+        df["주요합격"] = df[col_offer]
+    else:
+        df["주요합격"] = ""
+
+    if col_final_stage:
+        df["최종단계"] = df[col_final_stage]
+    else:
+        df["최종단계"] = ""
+
+    if col_admission_name:
+        df["전형명"] = df[col_admission_name]
+    else:
+        df["전형명"] = ""
+
+    if col_admission_method:
+        df["전형방법"] = df[col_admission_method]
+    else:
+        df["전형방법"] = ""
 
     # 5) 숫자형 변환
     for col in ["졸업년도", "중학교내신", "고교내신", "고입석차", "고등학교석차"]:
-        if col in df.columns:
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.extract(r"(\d+\.?\d*)")[0]
-            )
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = safe_to_numeric(df[col])
 
-    # 졸업년도 없는 행 제거
-    if "졸업년도" in df.columns:
-        df = df[df["졸업년도"].notna()].copy()
-        df["졸업년도"] = df["졸업년도"].astype(int)
+    # 졸업년도 없는 행은 제거
+    df = df[df["졸업년도"].notna()].copy()
+    df["졸업년도"] = df["졸업년도"].astype(int)
 
-    # 6) 주요합격 문자열에서 대학/전형/학과 정보 뽑기
+    # 6) 주요합격 문자열에서 대표대학/전형/학과 추출
     def parse_offer(text):
-        res = {
-            "대표대학": None,
-            "전형유형원문": None,
-            "대표학과": None,
+        result = {
+            "대표대학": "",
+            "전형유형원문": "",
+            "대표학과": "",
         }
 
-        if not isinstance(text, str) or not text.strip():
-            return res
+        if not isinstance(text, str):
+            return result
 
+        text = text.strip()
+        if not text:
+            return result
+
+        # 여러 합격 결과가 쉼표로 연결되어 있으면 첫 번째를 대표값으로 사용
         first = text.split(",")[0].strip()
-        parts = first.split("/")
 
-        # 대학명
-        uni_part = parts[0].strip()
-        uni_name = uni_part.split("(")[0].strip()
-        res["대표대학"] = uni_name
+        # 기본 형태: 대학/전형/학과
+        parts = [p.strip() for p in first.split("/")]
 
-        # 전형유형
-        if len(parts) > 1:
-            res["전형유형원문"] = parts[1].strip()
+        if len(parts) >= 1:
+            uni_part = parts[0]
+            # 예: 경희대(서울) → 경희대
+            result["대표대학"] = uni_part.split("(")[0].strip()
+
+        if len(parts) >= 2:
+            result["전형유형원문"] = parts[1].strip()
         else:
-            res["전형유형원문"] = uni_part
+            result["전형유형원문"] = first
 
-        # 학과
-        if len(parts) > 2:
-            res["대표학과"] = parts[2].strip()
+        if len(parts) >= 3:
+            result["대표학과"] = parts[2].strip()
 
-        return res
+        return result
 
-    parsed = df["주요합격"].apply(parse_offer).apply(pd.Series)
-    df = pd.concat([df, parsed], axis=1)
+    parsed = df["주요합격"].fillna("").astype(str).apply(parse_offer).apply(pd.Series)
+
+    # 기존 컬럼 중복 방지
+    for col in ["대표대학", "전형유형원문", "대표학과"]:
+        if col in df.columns:
+            df = df.drop(columns=[col])
+
+    df = pd.concat([df, parsed[["대표대학", "전형유형원문", "대표학과"]]], axis=1)
+
+    # 혹시라도 누락되면 다시 생성
+    for col in ["대표대학", "전형유형원문", "대표학과"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    df["대표대학"] = df["대표대학"].fillna("").astype(str)
+    df["전형유형원문"] = df["전형유형원문"].fillna("").astype(str)
+    df["대표학과"] = df["대표학과"].fillna("").astype(str)
 
     # 7) 전형 대분류
     def classify_type(text):
         if not isinstance(text, str):
             return "기타"
+
+        text = text.strip()
 
         if "교과" in text:
             return "교과"
@@ -176,19 +232,21 @@ def load_data():
 
         if any(k in text for k in [
             "기계", "전기", "전자", "화학", "컴퓨터", "소프트웨어",
-            "공학", "건축", "토목", "환경", "AI", "인공지능", "정보"
+            "공학", "건축", "토목", "환경", "AI", "인공지능", "정보",
+            "데이터", "반도체", "로봇", "자동차", "에너지"
         ]):
             return "공학/이공계열"
 
         if any(k in text for k in [
             "국어", "영어", "경영", "경제", "행정", "교육", "심리",
-            "사회", "문헌", "복지", "법", "정치", "언론", "미디어"
+            "사회", "문헌", "복지", "법", "정치", "언론", "미디어",
+            "역사", "철학", "문화", "관광", "유아교육", "초등교육"
         ]):
             return "인문/사회계열"
 
         if any(k in text for k in [
             "체육", "스포츠", "음악", "미술", "디자인", "무용",
-            "연극", "영화", "영상", "패션"
+            "연극", "영화", "영상", "패션", "뷰티"
         ]):
             return "예체능계열"
 
@@ -196,7 +254,7 @@ def load_data():
 
     df["학과계열"] = df["대표학과"].apply(classify_major_group)
 
-    # 9) 대학 그룹 플래그
+    # 9) 대학 그룹
     CAPITAL_REGION_UNIS = [
         "서울대학교", "연세대학교", "고려대학교",
         "성균관대학교", "한양대학교", "서강대학교",
@@ -211,7 +269,8 @@ def load_data():
         "제주대학교", "경상국립대학교", "금오공과대학교",
         "서울과학기술대학교", "한국교통대학교", "군산대학교",
         "공주대학교", "안동대학교", "창원대학교", "부경대학교",
-        "한국해양대학교", "목포대학교", "순천대학교"
+        "한국해양대학교", "목포대학교", "순천대학교",
+        "한국교원대학교", "한국체육대학교"
     ]
 
     TEACHER_UNIS = [
@@ -221,19 +280,38 @@ def load_data():
         "진주교육대학교", "제주교육대학교"
     ]
 
-    df["수도권대학"] = df["대표대학"].isin(CAPITAL_REGION_UNIS)
-    df["국립대학"] = df["대표대학"].isin(NATIONAL_UNIS)
+    def normalize_university_name(name):
+        if not isinstance(name, str):
+            return ""
+        return (
+            name.replace(" ", "")
+            .replace("대학", "대학교")
+            .strip()
+        )
+
+    df["대표대학정규화"] = df["대표대학"].apply(normalize_university_name)
+
+    capital_set = set([normalize_university_name(x) for x in CAPITAL_REGION_UNIS])
+    national_set = set([normalize_university_name(x) for x in NATIONAL_UNIS])
+    teacher_set = set([normalize_university_name(x) for x in TEACHER_UNIS])
+
+    df["수도권대학"] = df["대표대학정규화"].isin(capital_set)
+    df["국립대학"] = df["대표대학정규화"].isin(national_set)
 
     def is_teacher_univ(name):
         if not isinstance(name, str):
             return False
-        if ("교대" in name) or ("교육대" in name):
+
+        text = name.replace(" ", "").strip()
+
+        if ("교대" in text) or ("교육대" in text):
             return True
-        return name in TEACHER_UNIS
+
+        return normalize_university_name(text) in teacher_set
 
     df["교대"] = df["대표대학"].apply(is_teacher_univ)
 
-    # 10) 의치약한수, 간호 판별
+    # 10) 의치약한수, 간호
     MED_KEYWORDS = [
         "의예", "의학", "의학부",
         "치의", "치의예", "치의학",
@@ -245,23 +323,26 @@ def load_data():
     def is_med_major(major):
         if not isinstance(major, str):
             return False
+
         text = major.replace(" ", "").strip()
         return any(keyword in text for keyword in MED_KEYWORDS)
 
     def is_nursing_major(major):
         if not isinstance(major, str):
             return False
+
         text = major.replace(" ", "").strip()
         return "간호" in text
 
     df["의치약한수"] = df["대표학과"].apply(is_med_major)
     df["간호"] = df["대표학과"].apply(is_nursing_major)
 
-    # 10-1) 의치약한수 세부 카테고리
     def is_med_school(major):
         if not isinstance(major, str):
             return False
+
         text = major.replace(" ", "").strip()
+
         return (
             any(k in text for k in ["의예", "의학", "의학부"])
             and not any(k in text for k in ["치의", "한의", "수의"])
@@ -270,24 +351,28 @@ def load_data():
     def is_dent_school(major):
         if not isinstance(major, str):
             return False
+
         text = major.replace(" ", "").strip()
         return any(k in text for k in ["치의", "치의예", "치의학"])
 
     def is_pharm_school(major):
         if not isinstance(major, str):
             return False
+
         text = major.replace(" ", "").strip()
         return any(k in text for k in ["약학", "신약"])
 
     def is_korean_med_school(major):
         if not isinstance(major, str):
             return False
+
         text = major.replace(" ", "").strip()
         return any(k in text for k in ["한의", "한의예", "한의학", "한의약"])
 
     def is_vet_school(major):
         if not isinstance(major, str):
             return False
+
         text = major.replace(" ", "").strip()
         return any(k in text for k in ["수의", "수의예", "수의학"])
 
@@ -297,36 +382,41 @@ def load_data():
     df["한의대"] = df["대표학과"].apply(is_korean_med_school)
     df["수의대"] = df["대표학과"].apply(is_vet_school)
 
-    # 11) 농어촌 전형 플래그
-    def is_rural_from_text(text):
+    # 11) 농어촌
+    def contains_rural(text):
         if not isinstance(text, str):
             return False
         return "농어촌" in text
 
     df["농어촌"] = df.apply(
         lambda row: (
-            is_rural_from_text(row.get("전형유형원문", None)) or
-            is_rural_from_text(row.get("주요합격", None))
+            contains_rural(row.get("전형유형원문", "")) or
+            contains_rural(row.get("주요합격", "")) or
+            contains_rural(row.get("전형명", "")) or
+            contains_rural(row.get("전형방법", ""))
         ),
         axis=1
     )
 
     # 12) 합격여부 처리
-    # 최종단계가 있으면 우선 사용, 없으면 주요합격 문자열 기준
     positive_words = ["최초합격", "충원합격", "추가합격", "추합", "최종합격", "합격"]
 
     def decide_pass(row):
-        final_stage = row.get("최종단계", None)
-        offer = row.get("주요합격", None)
+        final_stage = row.get("최종단계", "")
+        offer = row.get("주요합격", "")
 
         if isinstance(final_stage, str) and final_stage.strip():
             text = final_stage.strip()
+
             if "불합격" in text:
                 return "불합격"
+
             if any(word in text for word in positive_words):
                 return "합격"
 
         if isinstance(offer, str) and offer.strip():
+            if "불합격" in offer:
+                return "불합격"
             return "합격"
 
         return "미상"
@@ -342,22 +432,36 @@ if st.sidebar.button("🔄 최신 데이터 다시 불러오기"):
     st.rerun()
 
 
-df = load_data()
+# ---------------- 데이터 로딩 ----------------
+try:
+    df = load_data()
+except Exception as e:
+    st.error("데이터를 불러오는 중 오류가 발생했습니다.")
+    st.exception(e)
+    st.stop()
 
 
-# ---------------- 1-1. 데이터 진단 표시 ----------------
+# ---------------- 데이터 진단 정보 ----------------
 with st.expander("데이터 진단 정보 보기"):
     st.write("현재 앱이 읽은 전체 행 수:", len(df))
 
     if "졸업년도" in df.columns:
         st.write("졸업년도 목록:", sorted(df["졸업년도"].dropna().unique().tolist()))
-        st.write("졸업년도별 인원:")
-        st.dataframe(df["졸업년도"].value_counts().sort_index().reset_index().rename(
-            columns={"index": "졸업년도", "졸업년도": "인원"}
-        ))
+
+        year_count = (
+            df["졸업년도"]
+            .value_counts()
+            .sort_index()
+            .reset_index()
+        )
+        year_count.columns = ["졸업년도", "인원"]
+        st.dataframe(year_count, use_container_width=True)
 
     st.write("현재 인식된 컬럼 목록:")
     st.write(df.columns.tolist())
+
+    st.markdown("#### 데이터 앞부분")
+    st.dataframe(df.head(10), use_container_width=True)
 
 
 # ---------------- 2. 사이드바: 검색 조건 ----------------
@@ -388,14 +492,14 @@ else:
 
 # 대표대학 필터
 if "대표대학" in df.columns:
-    uni_counts = df["대표대학"].dropna().value_counts()
-    major_universities = uni_counts.head(30).index.tolist()
+    uni_counts = df["대표대학"].replace("", pd.NA).dropna().value_counts()
+    major_universities = uni_counts.head(50).index.tolist()
 
     selected_universities = st.sidebar.multiselect(
-        "대표 대학 (주요 4년제 위주)",
+        "대표 대학",
         options=major_universities,
         default=major_universities,
-        help="우리 학교에서 합격자가 많은 상위 대학 위주의 목록입니다. 복수 선택 가능합니다.",
+        help="합격자가 많은 대학 목록입니다. 필요하면 선택을 줄여 검색할 수 있습니다.",
     )
 else:
     selected_universities = []
@@ -414,6 +518,21 @@ if "고교내신" in df.columns and df["고교내신"].notna().any():
     )
 else:
     grade_range = None
+
+# 중학교 내신
+if "중학교내신" in df.columns and df["중학교내신"].notna().any():
+    min_middle_grade = float(df["중학교내신"].min())
+    max_middle_grade = float(df["중학교내신"].max())
+
+    middle_grade_range = st.sidebar.slider(
+        "중학교 내신성적 범위",
+        min_value=round(min_middle_grade, 1),
+        max_value=round(max_middle_grade, 1),
+        value=(round(min_middle_grade, 1), round(max_middle_grade, 1)),
+        step=0.1,
+    )
+else:
+    middle_grade_range = None
 
 # 전형 대분류
 if "전형대분류" in df.columns:
@@ -447,7 +566,7 @@ med_view_option = st.sidebar.selectbox(
 keyword = st.sidebar.text_input(
     "대학/전형/학과 키워드",
     value="",
-    placeholder="예: 서울대, 의학, 간호, 교대, 농어촌",
+    placeholder="예: 경북대, 간호, 교대, 농어촌, 정시",
 )
 
 # 대학/전형 그룹 필터
@@ -468,7 +587,7 @@ if year_range and "졸업년도" in filtered.columns:
         (filtered["졸업년도"] <= year_range[1])
     ]
 
-# 중학교
+# 출신중
 if selected_middle != "전체" and "출신중" in filtered.columns:
     filtered = filtered[filtered["출신중"].astype(str) == selected_middle]
 
@@ -481,6 +600,13 @@ if grade_range and "고교내신" in filtered.columns:
     filtered = filtered[
         (filtered["고교내신"] >= grade_range[0]) &
         (filtered["고교내신"] <= grade_range[1])
+    ]
+
+# 중학교 내신
+if middle_grade_range and "중학교내신" in filtered.columns:
+    filtered = filtered[
+        (filtered["중학교내신"] >= middle_grade_range[0]) &
+        (filtered["중학교내신"] <= middle_grade_range[1])
     ]
 
 # 전형대분류
@@ -516,6 +642,7 @@ if keyword:
         "대표학과",
         "전형명",
         "전형방법",
+        "최종단계",
     ]
 
     available_search_cols = [col for col in search_cols if col in filtered.columns]
@@ -524,7 +651,12 @@ if keyword:
         mask = pd.Series(False, index=filtered.index)
 
         for col in available_search_cols:
-            mask = mask | filtered[col].fillna("").astype(str).str.contains(keyword, case=False, na=False)
+            mask = mask | filtered[col].fillna("").astype(str).str.contains(
+                keyword,
+                case=False,
+                na=False,
+                regex=False
+            )
 
         filtered = filtered[mask]
 
@@ -543,7 +675,6 @@ if group_filter:
 st.subheader("검색 결과 요약")
 st.write(f"조건에 해당하는 학생 수: **{len(filtered)}명**")
 
-# 화면에 보여줄 주요 컬럼
 display_cols = [
     "졸업년도",
     "출신중",
@@ -558,6 +689,7 @@ display_cols = [
     "전형명",
     "전형방법",
     "주요합격",
+    "최종단계",
     "합격여부",
 ]
 
@@ -574,7 +706,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 )
 
 
-# --- 탭 1: 대학별 합격자 인원 비교 ---
+# ---------------- 탭 1: 대학별 합격자 ----------------
 with tab1:
     st.markdown("### 대학별 합격자 인원 비교")
 
@@ -584,28 +716,32 @@ with tab1:
         st.info("현재 필터 조건에서 합격 데이터가 없습니다.")
     else:
         uni_count = (
-            df_uni.groupby("대표대학")["성명"]
+            df_uni[df_uni["대표대학"] != ""]
+            .groupby("대표대학")["성명"]
             .count()
             .reset_index(name="합격자수")
             .sort_values("합격자수", ascending=False)
         )
 
-        chart_uni = (
-            alt.Chart(uni_count)
-            .mark_bar()
-            .encode(
-                x=alt.X("대표대학:N", sort="-y", title="대학"),
-                y=alt.Y("합격자수:Q", title="합격자 수"),
-                tooltip=["대표대학", "합격자수"],
+        if uni_count.empty:
+            st.info("대표대학을 인식한 데이터가 없습니다.")
+        else:
+            chart_uni = (
+                alt.Chart(uni_count)
+                .mark_bar()
+                .encode(
+                    x=alt.X("대표대학:N", sort="-y", title="대학"),
+                    y=alt.Y("합격자수:Q", title="합격자 수"),
+                    tooltip=["대표대학", "합격자수"],
+                )
+                .properties(height=350)
             )
-            .properties(height=350)
-        )
 
-        st.altair_chart(chart_uni, use_container_width=True)
-        st.dataframe(uni_count, use_container_width=True)
+            st.altair_chart(chart_uni, use_container_width=True)
+            st.dataframe(uni_count, use_container_width=True)
 
 
-# --- 탭 2: 연도별 합격 추세 ---
+# ---------------- 탭 2: 연도별 합격 추세 ----------------
 with tab2:
     st.markdown("### 연도별 합격 추세")
 
@@ -659,7 +795,7 @@ with tab2:
         st.dataframe(trend_type, use_container_width=True)
 
 
-# --- 탭 3: 중학교·전형·내신 분석 ---
+# ---------------- 탭 3: 중학교·전형·내신 ----------------
 with tab3:
     st.markdown("### 중학교별 · 전형대분류별 평균 내신 비교")
 
@@ -673,6 +809,7 @@ with tab3:
                 df_valid.groupby(["출신중", "전형대분류"])["고교내신"]
                 .mean()
                 .reset_index(name="평균내신")
+                .sort_values("평균내신")
             )
 
             chart_pivot = (
@@ -693,7 +830,7 @@ with tab3:
         st.info("출신중 정보가 없습니다.")
 
 
-# --- 탭 4: 의대/간호/교대 분석 ---
+# ---------------- 탭 4: 의대/간호/교대 분석 ----------------
 with tab4:
     st.markdown("### 우리 학교 의대 · 간호 · 교대 진학 분석")
 
@@ -712,7 +849,7 @@ with tab4:
     with col3:
         st.metric("교대 합격자", len(tch_df))
 
-    st.markdown("#### 의치약한수 합격자 수")
+    st.markdown("#### 의치약한수 합격자")
     if not med_df.empty:
         med_trend = (
             med_df.groupby("졸업년도")["성명"]
@@ -736,7 +873,7 @@ with tab4:
     else:
         st.info("의치약한수 합격 데이터가 없습니다.")
 
-    st.markdown("#### 간호 계열 합격자 수")
+    st.markdown("#### 간호 계열 합격자")
     if not nur_df.empty:
         nur_trend = (
             nur_df.groupby("졸업년도")["성명"]
@@ -760,7 +897,7 @@ with tab4:
     else:
         st.info("간호 계열 합격 데이터가 없습니다.")
 
-    st.markdown("#### 교대 합격자 수")
+    st.markdown("#### 교대 합격자")
     if not tch_df.empty:
         tch_trend = (
             tch_df.groupby("졸업년도")["성명"]
@@ -785,9 +922,10 @@ with tab4:
         st.info("교대 합격 데이터가 없습니다.")
 
 
-# --- 탭 5: 데이터 구조 보기 ---
+# ---------------- 탭 5: 데이터 구조 보기 ----------------
 with tab5:
     st.markdown("### 데이터 컬럼 구조 확인")
+
     st.write("현재 데이터프레임의 컬럼 목록입니다.")
     st.write(df.columns.tolist())
 
@@ -804,6 +942,13 @@ with tab5:
         )
         year_count.columns = ["졸업년도", "인원"]
         st.dataframe(year_count, use_container_width=True)
+
+    st.markdown("### 대표대학 인식 결과")
+    if "대표대학" in df.columns:
+        st.dataframe(
+            df[["주요합격", "대표대학", "전형유형원문", "대표학과"]].head(30),
+            use_container_width=True
+        )
 
 
 # ---------------- 5. 화면 좌측 하단 만든이 표시 ----------------
