@@ -81,24 +81,116 @@ def column_score(df):
 
 def read_admission_file(file_path):
     """
-    admission_results.csv를 안전하게 읽기.
-    - 일반 CSV
-    - 탭 구분 파일인데 확장자만 .csv인 경우
-    - cp949/euc-kr 인코딩
-    을 모두 시도합니다.
+    admission_results.csv를 최대한 안전하게 읽는 함수.
+    표준 CSV 파싱이 실패해도 직접 줄 단위로 읽어서 처리합니다.
+
+    핵심:
+    - utf-8-sig, utf-8, cp949, euc-kr 순서로 시도
+    - 쉼표/탭/세미콜론/파이프 구분 자동 감지
+    - 한 행의 칸 수가 헤더보다 많으면 마지막 칸에 합쳐서 보존
+      예: 주요합격 칸 안에 쉼표가 들어가도 앱이 죽지 않게 처리
     """
-    encodings = ["utf-8-sig", "cp949", "euc-kr"]
-    separators = [
-        ("\t", "탭 구분"),
-        (",", "쉼표 CSV"),
-        (";", "세미콜론 구분"),
-        ("|", "파이프 구분"),
+
+    encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr"]
+    last_error = None
+    text = None
+    used_encoding = None
+
+    # 1) 파일을 텍스트로 직접 읽기
+    for enc in encodings:
+        try:
+            with open(file_path, "r", encoding=enc, errors="replace") as f:
+                text = f.read()
+            used_encoding = enc
+            break
+        except Exception as e:
+            last_error = e
+
+    if text is None:
+        raise ValueError(f"{file_path} 파일을 열 수 없습니다. 마지막 오류: {last_error}")
+
+    # 2) 줄 정리
+    lines = text.splitlines()
+    lines = [line for line in lines if line.strip()]
+
+    if not lines:
+        raise ValueError(f"{file_path} 파일이 비어 있습니다.")
+
+    # 3) 첫 줄을 보고 구분자 자동 판단
+    header_line = lines[0]
+
+    delimiter_candidates = ["\t", ",", ";", "|"]
+    delimiter = max(delimiter_candidates, key=lambda d: header_line.count(d))
+
+    # 혹시 어떤 구분자도 없으면 쉼표로 처리
+    if header_line.count(delimiter) == 0:
+        delimiter = ","
+
+    # 4) 헤더 처리
+    headers = [h.strip().strip('"').strip("'") for h in header_line.split(delimiter)]
+    headers = [
+        h.replace("\ufeff", "").replace("\n", "").replace("\r", "").strip()
+        for h in headers
     ]
 
-    best_df = None
-    best_score = -999
-    best_info = ""
-    errors = []
+    # 빈 헤더 방지
+    headers = [
+        h if h else f"빈컬럼{i+1}"
+        for i, h in enumerate(headers)
+    ]
+
+    col_count = len(headers)
+
+    if col_count <= 1:
+        raise ValueError(
+            "컬럼이 1개로만 인식되었습니다. "
+            "CSV의 첫 줄 헤더가 탭/쉼표 등으로 구분되어 있는지 확인해 주세요."
+        )
+
+    # 5) 데이터 줄 처리
+    rows = []
+
+    for line in lines[1:]:
+        parts = line.split(delimiter)
+
+        # 칸 수가 부족하면 빈칸으로 채움
+        if len(parts) < col_count:
+            parts = parts + [""] * (col_count - len(parts))
+
+        # 칸 수가 많으면 마지막 컬럼에 합침
+        # 보통 '주요 합격 대학/전형/학과' 안의 쉼표 때문에 이런 문제가 생김
+        elif len(parts) > col_count:
+            parts = parts[:col_count - 1] + [delimiter.join(parts[col_count - 1:])]
+
+        cleaned = []
+        for p in parts:
+            cell = str(p).strip()
+
+            # 앞뒤 큰따옴표 정리
+            if len(cell) >= 2 and cell[0] == '"' and cell[-1] == '"':
+                cell = cell[1:-1]
+
+            # CSV 내부 큰따옴표 복원
+            cell = cell.replace('""', '"')
+
+            cleaned.append(cell)
+
+        rows.append(cleaned)
+
+    df = pd.DataFrame(rows, columns=headers)
+
+    # 6) 컬럼명 최종 정리
+    df.columns = (
+        df.columns.astype(str)
+        .str.replace("\ufeff", "", regex=False)
+        .str.replace("\n", "", regex=False)
+        .str.replace("\r", "", regex=False)
+        .str.strip()
+    )
+
+    df.attrs["read_info"] = f"{used_encoding} / 직접 줄 단위 읽기 / 구분자: {repr(delimiter)}"
+
+    return df
 
     # 1차: 구분자를 명시해서 읽기
     for enc in encodings:
