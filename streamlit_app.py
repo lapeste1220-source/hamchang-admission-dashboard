@@ -236,6 +236,11 @@ def load_data():
     return df
 
 
+# ---------------- 캐시 초기화 버튼 ----------------
+if st.sidebar.button("🔄 최신 데이터 다시 불러오기"):
+    st.cache_data.clear()
+    st.rerun()
+
 df = load_data()
 
 
