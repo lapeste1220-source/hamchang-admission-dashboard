@@ -15,6 +15,7 @@ def normalize_col_name(col):
     """컬럼명 비교용 정규화"""
     return (
         str(col)
+        .replace("\ufeff", "")
         .replace("\n", "")
         .replace("\r", "")
         .replace(" ", "")
@@ -42,18 +43,184 @@ def safe_to_numeric(series):
     )
 
 
+def column_score(df):
+    """
+    데이터프레임이 입시결과 파일처럼 잘 읽혔는지 점수화.
+    탭 구분 파일을 쉼표 CSV로 잘못 읽으면 컬럼이 1개로 잡히므로 점수가 낮아집니다.
+    """
+    cols = set(normalize_col_name(c) for c in df.columns)
+
+    groups = [
+        ["졸업년도", "졸업연도"],
+        ["출신중", "출신중학교"],
+        ["성명", "이름", "학생명"],
+        ["내신(중)", "중학교내신", "중학교내신성적"],
+        ["내신(고)", "고교내신", "고등학교내신"],
+        ["고입석차"],
+        ["고등학교석차"],
+        [
+            "주요합격대학/전형/학과",
+            "주요합격",
+            "합격대학/전형/학과",
+            "대학/전형/학과",
+            "주요합격대학전형학과",
+        ],
+    ]
+
+    score = 0
+    for group in groups:
+        if any(normalize_col_name(x) in cols for x in group):
+            score += 1
+
+    # 컬럼 수가 너무 적으면 감점
+    if len(df.columns) <= 1:
+        score -= 5
+
+    return score
+
+
+def read_admission_file(file_path):
+    """
+    admission_results.csv를 안전하게 읽기.
+    - 일반 CSV
+    - 탭 구분 파일인데 확장자만 .csv인 경우
+    - cp949/euc-kr 인코딩
+    을 모두 시도합니다.
+    """
+    encodings = ["utf-8-sig", "cp949", "euc-kr"]
+    separators = [
+        ("\t", "탭 구분"),
+        (",", "쉼표 CSV"),
+        (";", "세미콜론 구분"),
+        ("|", "파이프 구분"),
+    ]
+
+    best_df = None
+    best_score = -999
+    best_info = ""
+    errors = []
+
+    # 1차: 구분자를 명시해서 읽기
+    for enc in encodings:
+        for sep, sep_name in separators:
+            try:
+                temp = pd.read_csv(
+                    file_path,
+                    encoding=enc,
+                    sep=sep,
+                    engine="python",
+                    dtype=str
+                )
+
+                temp.columns = (
+                    temp.columns.astype(str)
+                    .str.replace("\ufeff", "", regex=False)
+                    .str.replace("\n", "", regex=False)
+                    .str.replace("\r", "", regex=False)
+                    .str.strip()
+                )
+
+                score = column_score(temp)
+
+                if score > best_score:
+                    best_score = score
+                    best_df = temp
+                    best_info = f"{enc} / {sep_name}"
+
+                # 필수 컬럼이 어느 정도 잡혔다면 바로 사용
+                if score >= 3 and len(temp.columns) >= 3:
+                    temp.attrs["read_info"] = f"{enc} / {sep_name}"
+                    return temp
+
+            except Exception as e:
+                errors.append(f"{enc} / {sep_name}: {e}")
+
+    # 2차: pandas 자동 구분자 추론
+    for enc in encodings:
+        try:
+            temp = pd.read_csv(
+                file_path,
+                encoding=enc,
+                sep=None,
+                engine="python",
+                dtype=str
+            )
+
+            temp.columns = (
+                temp.columns.astype(str)
+                .str.replace("\ufeff", "", regex=False)
+                .str.replace("\n", "", regex=False)
+                .str.replace("\r", "", regex=False)
+                .str.strip()
+            )
+
+            score = column_score(temp)
+
+            if score > best_score:
+                best_score = score
+                best_df = temp
+                best_info = f"{enc} / 자동 구분자 추론"
+
+            if score >= 3 and len(temp.columns) >= 3:
+                temp.attrs["read_info"] = f"{enc} / 자동 구분자 추론"
+                return temp
+
+        except Exception as e:
+            errors.append(f"{enc} / 자동 구분자 추론: {e}")
+
+    # 3차: 깨지는 줄은 건너뛰고 읽기
+    # 단, 이 경우 일부 행이 빠질 수 있으므로 최후 수단입니다.
+    for enc in encodings:
+        for sep, sep_name in separators:
+            try:
+                temp = pd.read_csv(
+                    file_path,
+                    encoding=enc,
+                    sep=sep,
+                    engine="python",
+                    dtype=str,
+                    on_bad_lines="skip"
+                )
+
+                temp.columns = (
+                    temp.columns.astype(str)
+                    .str.replace("\ufeff", "", regex=False)
+                    .str.replace("\n", "", regex=False)
+                    .str.replace("\r", "", regex=False)
+                    .str.strip()
+                )
+
+                score = column_score(temp)
+
+                if score > best_score:
+                    best_score = score
+                    best_df = temp
+                    best_info = f"{enc} / {sep_name} / 문제 행 건너뜀"
+
+            except Exception as e:
+                errors.append(f"{enc} / {sep_name} / skip: {e}")
+
+    if best_df is not None and len(best_df.columns) >= 2:
+        best_df.attrs["read_info"] = best_info
+        return best_df
+
+    raise ValueError(
+        "admission_results.csv를 읽을 수 없습니다. "
+        "파일이 실제 CSV 또는 탭 구분 텍스트인지 확인해 주세요. "
+        f"시도한 오류 목록: {errors[:5]}"
+    )
+
+
 # ---------------- 1. 데이터 불러오기 + 전처리 ----------------
 @st.cache_data
 def load_data():
     # 1) CSV 불러오기
-    try:
-        df = pd.read_csv("admission_results.csv", encoding="utf-8-sig")
-    except UnicodeDecodeError:
-        df = pd.read_csv("admission_results.csv", encoding="euc-kr")
+    df = read_admission_file("admission_results.csv")
 
     # 2) 원본 컬럼명 기본 정리
     df.columns = (
         df.columns.astype(str)
+        .str.replace("\ufeff", "", regex=False)
         .str.replace("\n", "", regex=False)
         .str.replace("\r", "", regex=False)
         .str.strip()
@@ -67,6 +234,7 @@ def load_data():
     col_high_grade = first_existing_column(df, ["내신(고)", "고교내신", "고교 내신", "고등학교내신", "고등학교 내신"])
     col_middle_rank = first_existing_column(df, ["고입석차", "고입 석차"])
     col_high_rank = first_existing_column(df, ["고등학교석차", "고등학교 석차", "고등학교\n석차"])
+
     col_offer = first_existing_column(
         df,
         [
@@ -76,67 +244,34 @@ def load_data():
             "합격대학/전형/학과",
             "대학/전형/학과",
             "주요 합격",
+            "주요합격대학전형학과",
         ],
     )
+
+    # 주요합격 컬럼명이 예상과 달라도 최대한 찾아보기
+    if col_offer is None:
+        for c in df.columns:
+            compact = normalize_col_name(c)
+            if "합격" in compact and ("대학" in compact or "전형" in compact or "학과" in compact):
+                col_offer = c
+                break
+
     col_final_stage = first_existing_column(df, ["최종단계", "최종 단계", "최종결과", "합격결과"])
     col_admission_name = first_existing_column(df, ["전형명", "세부전형명", "전형 이름"])
     col_admission_method = first_existing_column(df, ["전형방법", "전형 방법", "방법"])
 
     # 4) 표준 컬럼 생성
-    if col_graduation:
-        df["졸업년도"] = df[col_graduation]
-    else:
-        df["졸업년도"] = None
-
-    if col_middle:
-        df["출신중"] = df[col_middle]
-    else:
-        df["출신중"] = None
-
-    if col_name:
-        df["성명"] = df[col_name]
-    else:
-        df["성명"] = None
-
-    if col_middle_grade:
-        df["중학교내신"] = df[col_middle_grade]
-    else:
-        df["중학교내신"] = None
-
-    if col_high_grade:
-        df["고교내신"] = df[col_high_grade]
-    else:
-        df["고교내신"] = None
-
-    if col_middle_rank:
-        df["고입석차"] = df[col_middle_rank]
-    else:
-        df["고입석차"] = None
-
-    if col_high_rank:
-        df["고등학교석차"] = df[col_high_rank]
-    else:
-        df["고등학교석차"] = None
-
-    if col_offer:
-        df["주요합격"] = df[col_offer]
-    else:
-        df["주요합격"] = ""
-
-    if col_final_stage:
-        df["최종단계"] = df[col_final_stage]
-    else:
-        df["최종단계"] = ""
-
-    if col_admission_name:
-        df["전형명"] = df[col_admission_name]
-    else:
-        df["전형명"] = ""
-
-    if col_admission_method:
-        df["전형방법"] = df[col_admission_method]
-    else:
-        df["전형방법"] = ""
+    df["졸업년도"] = df[col_graduation] if col_graduation else None
+    df["출신중"] = df[col_middle] if col_middle else None
+    df["성명"] = df[col_name] if col_name else None
+    df["중학교내신"] = df[col_middle_grade] if col_middle_grade else None
+    df["고교내신"] = df[col_high_grade] if col_high_grade else None
+    df["고입석차"] = df[col_middle_rank] if col_middle_rank else None
+    df["고등학교석차"] = df[col_high_rank] if col_high_rank else None
+    df["주요합격"] = df[col_offer] if col_offer else ""
+    df["최종단계"] = df[col_final_stage] if col_final_stage else ""
+    df["전형명"] = df[col_admission_name] if col_admission_name else ""
+    df["전형방법"] = df[col_admission_method] if col_admission_method else ""
 
     # 5) 숫자형 변환
     for col in ["졸업년도", "중학교내신", "고교내신", "고입석차", "고등학교석차"]:
@@ -144,6 +279,13 @@ def load_data():
 
     # 졸업년도 없는 행은 제거
     df = df[df["졸업년도"].notna()].copy()
+
+    if df.empty:
+        raise ValueError(
+            "졸업년도 데이터를 찾지 못했습니다. "
+            "CSV 파일의 졸업년도/졸업연도 컬럼명을 확인해 주세요."
+        )
+
     df["졸업년도"] = df["졸업년도"].astype(int)
 
     # 6) 주요합격 문자열에서 대표대학/전형/학과 추출
@@ -169,7 +311,6 @@ def load_data():
 
         if len(parts) >= 1:
             uni_part = parts[0]
-            # 예: 경희대(서울) → 경희대
             result["대표대학"] = uni_part.split("(")[0].strip()
 
         if len(parts) >= 2:
@@ -191,7 +332,6 @@ def load_data():
 
     df = pd.concat([df, parsed[["대표대학", "전형유형원문", "대표학과"]]], axis=1)
 
-    # 혹시라도 누락되면 다시 생성
     for col in ["대표대학", "전형유형원문", "대표학과"]:
         if col not in df.columns:
             df[col] = ""
@@ -445,6 +585,10 @@ except Exception as e:
 with st.expander("데이터 진단 정보 보기"):
     st.write("현재 앱이 읽은 전체 행 수:", len(df))
 
+    read_info = df.attrs.get("read_info", "")
+    if read_info:
+        st.write("파일 읽기 방식:", read_info)
+
     if "졸업년도" in df.columns:
         st.write("졸업년도 목록:", sorted(df["졸업년도"].dropna().unique().tolist()))
 
@@ -491,15 +635,16 @@ else:
     selected_middle = "전체"
 
 # 대표대학 필터
+# 중요: 기본값을 비워 두어, 아무 대학도 선택하지 않았을 때 전체가 보이게 합니다.
 if "대표대학" in df.columns:
     uni_counts = df["대표대학"].replace("", pd.NA).dropna().value_counts()
-    major_universities = uni_counts.head(50).index.tolist()
+    university_options = uni_counts.index.tolist()
 
     selected_universities = st.sidebar.multiselect(
         "대표 대학",
-        options=major_universities,
-        default=major_universities,
-        help="합격자가 많은 대학 목록입니다. 필요하면 선택을 줄여 검색할 수 있습니다.",
+        options=university_options,
+        default=[],
+        help="선택하지 않으면 전체 대학을 보여줍니다. 특정 대학만 보고 싶을 때 선택하세요.",
     )
 else:
     selected_universities = []
@@ -592,6 +737,7 @@ if selected_middle != "전체" and "출신중" in filtered.columns:
     filtered = filtered[filtered["출신중"].astype(str) == selected_middle]
 
 # 대표대학
+# 대학을 선택했을 때만 필터링합니다.
 if selected_universities and "대표대학" in filtered.columns:
     filtered = filtered[filtered["대표대학"].isin(selected_universities)]
 
