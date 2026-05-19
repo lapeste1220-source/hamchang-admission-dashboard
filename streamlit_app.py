@@ -43,58 +43,21 @@ def safe_to_numeric(series):
     )
 
 
-def column_score(df):
-    """
-    데이터프레임이 입시결과 파일처럼 잘 읽혔는지 점수화.
-    탭 구분 파일을 쉼표 CSV로 잘못 읽으면 컬럼이 1개로 잡히므로 점수가 낮아집니다.
-    """
-    cols = set(normalize_col_name(c) for c in df.columns)
-
-    groups = [
-        ["졸업년도", "졸업연도"],
-        ["출신중", "출신중학교"],
-        ["성명", "이름", "학생명"],
-        ["내신(중)", "중학교내신", "중학교내신성적"],
-        ["내신(고)", "고교내신", "고등학교내신"],
-        ["고입석차"],
-        ["고등학교석차"],
-        [
-            "주요합격대학/전형/학과",
-            "주요합격",
-            "합격대학/전형/학과",
-            "대학/전형/학과",
-            "주요합격대학전형학과",
-        ],
-    ]
-
-    score = 0
-    for group in groups:
-        if any(normalize_col_name(x) in cols for x in group):
-            score += 1
-
-    # 컬럼 수가 너무 적으면 감점
-    if len(df.columns) <= 1:
-        score -= 5
-
-    return score
-
-
 def read_admission_file(file_path):
     """
-    admission_results.csv를 최대한 안전하게 읽는 함수.
-    표준 CSV 파싱이 실패해도 직접 줄 단위로 읽어서 처리합니다.
+    admission_results.csv를 안전하게 읽는 함수.
 
-    핵심:
-    - utf-8-sig, utf-8, cp949, euc-kr 순서로 시도
-    - 쉼표/탭/세미콜론/파이프 구분 자동 감지
-    - 한 행의 칸 수가 헤더보다 많으면 마지막 칸에 합쳐서 보존
-      예: 주요합격 칸 안에 쉼표가 들어가도 앱이 죽지 않게 처리
+    처리 내용:
+    1. 파일 앞부분에 제목행/빈행이 있어도 실제 헤더 행 자동 탐색
+    2. 탭 구분, 쉼표 구분, 세미콜론 구분, 파이프 구분 자동 감지
+    3. utf-8-sig, utf-8, cp949, euc-kr 인코딩 대응
+    4. 데이터 줄의 칸 수가 헤더보다 많으면 마지막 컬럼에 합쳐서 보존
     """
 
     encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr"]
-    last_error = None
     text = None
     used_encoding = None
+    last_error = None
 
     # 1) 파일을 텍스트로 직접 읽기
     for enc in encodings:
@@ -116,26 +79,52 @@ def read_admission_file(file_path):
     if not lines:
         raise ValueError(f"{file_path} 파일이 비어 있습니다.")
 
-    # 3) 첫 줄을 보고 구분자 자동 판단
-    header_line = lines[0]
+    # 3) 실제 헤더 행 찾기
+    # 예: 파일 1행에 '출신중학교별 대입전형 결과...' 같은 제목이 있을 수 있으므로
+    # '졸업년도'와 '성명'이 들어간 줄을 실제 헤더로 인식
+    header_idx = None
 
+    for i, line in enumerate(lines):
+        compact = (
+            line.replace(" ", "")
+            .replace("\t", "")
+            .replace(",", "")
+            .replace(";", "")
+            .replace("|", "")
+        )
+
+        if ("졸업년도" in compact or "졸업연도" in compact) and "성명" in compact:
+            header_idx = i
+            break
+
+    if header_idx is None:
+        raise ValueError(
+            "실제 헤더 행을 찾지 못했습니다. "
+            "파일 안에 '졸업년도'와 '성명'이 들어간 제목 행이 있는지 확인해 주세요."
+        )
+
+    header_line = lines[header_idx]
+    data_lines = lines[header_idx + 1:]
+
+    # 4) 헤더 줄 기준으로 구분자 판단
     delimiter_candidates = ["\t", ",", ";", "|"]
     delimiter = max(delimiter_candidates, key=lambda d: header_line.count(d))
 
-    # 혹시 어떤 구분자도 없으면 쉼표로 처리
     if header_line.count(delimiter) == 0:
-        delimiter = ","
+        raise ValueError(
+            "헤더 행에서 구분자를 찾지 못했습니다. "
+            "엑셀에서 CSV UTF-8 또는 탭 구분 텍스트로 다시 저장해 주세요."
+        )
 
-    # 4) 헤더 처리
+    # 5) 헤더 처리
     headers = [h.strip().strip('"').strip("'") for h in header_line.split(delimiter)]
     headers = [
         h.replace("\ufeff", "").replace("\n", "").replace("\r", "").strip()
         for h in headers
     ]
 
-    # 빈 헤더 방지
     headers = [
-        h if h else f"빈컬럼{i+1}"
+        h if h else f"빈컬럼{i + 1}"
         for i, h in enumerate(headers)
     ]
 
@@ -144,13 +133,16 @@ def read_admission_file(file_path):
     if col_count <= 1:
         raise ValueError(
             "컬럼이 1개로만 인식되었습니다. "
-            "CSV의 첫 줄 헤더가 탭/쉼표 등으로 구분되어 있는지 확인해 주세요."
+            "CSV의 실제 헤더가 탭/쉼표 등으로 구분되어 있는지 확인해 주세요."
         )
 
-    # 5) 데이터 줄 처리
+    # 6) 데이터 줄 처리
     rows = []
 
-    for line in lines[1:]:
+    for line in data_lines:
+        if not line.strip():
+            continue
+
         parts = line.split(delimiter)
 
         # 칸 수가 부족하면 빈칸으로 채움
@@ -158,7 +150,7 @@ def read_admission_file(file_path):
             parts = parts + [""] * (col_count - len(parts))
 
         # 칸 수가 많으면 마지막 컬럼에 합침
-        # 보통 '주요 합격 대학/전형/학과' 안의 쉼표 때문에 이런 문제가 생김
+        # 주요 합격 대학/전형/학과 안에 쉼표나 구분자가 들어간 경우 대비
         elif len(parts) > col_count:
             parts = parts[:col_count - 1] + [delimiter.join(parts[col_count - 1:])]
 
@@ -166,20 +158,16 @@ def read_admission_file(file_path):
         for p in parts:
             cell = str(p).strip()
 
-            # 앞뒤 큰따옴표 정리
             if len(cell) >= 2 and cell[0] == '"' and cell[-1] == '"':
                 cell = cell[1:-1]
 
-            # CSV 내부 큰따옴표 복원
             cell = cell.replace('""', '"')
-
             cleaned.append(cell)
 
         rows.append(cleaned)
 
     df = pd.DataFrame(rows, columns=headers)
 
-    # 6) 컬럼명 최종 정리
     df.columns = (
         df.columns.astype(str)
         .str.replace("\ufeff", "", regex=False)
@@ -188,125 +176,18 @@ def read_admission_file(file_path):
         .str.strip()
     )
 
-    df.attrs["read_info"] = f"{used_encoding} / 직접 줄 단위 읽기 / 구분자: {repr(delimiter)}"
+    df.attrs["read_info"] = (
+        f"{used_encoding} / 직접 줄 단위 읽기 / "
+        f"헤더 행: {header_idx + 1}행 / 구분자: {repr(delimiter)}"
+    )
 
     return df
-
-    # 1차: 구분자를 명시해서 읽기
-    for enc in encodings:
-        for sep, sep_name in separators:
-            try:
-                temp = pd.read_csv(
-                    file_path,
-                    encoding=enc,
-                    sep=sep,
-                    engine="python",
-                    dtype=str
-                )
-
-                temp.columns = (
-                    temp.columns.astype(str)
-                    .str.replace("\ufeff", "", regex=False)
-                    .str.replace("\n", "", regex=False)
-                    .str.replace("\r", "", regex=False)
-                    .str.strip()
-                )
-
-                score = column_score(temp)
-
-                if score > best_score:
-                    best_score = score
-                    best_df = temp
-                    best_info = f"{enc} / {sep_name}"
-
-                # 필수 컬럼이 어느 정도 잡혔다면 바로 사용
-                if score >= 3 and len(temp.columns) >= 3:
-                    temp.attrs["read_info"] = f"{enc} / {sep_name}"
-                    return temp
-
-            except Exception as e:
-                errors.append(f"{enc} / {sep_name}: {e}")
-
-    # 2차: pandas 자동 구분자 추론
-    for enc in encodings:
-        try:
-            temp = pd.read_csv(
-                file_path,
-                encoding=enc,
-                sep=None,
-                engine="python",
-                dtype=str
-            )
-
-            temp.columns = (
-                temp.columns.astype(str)
-                .str.replace("\ufeff", "", regex=False)
-                .str.replace("\n", "", regex=False)
-                .str.replace("\r", "", regex=False)
-                .str.strip()
-            )
-
-            score = column_score(temp)
-
-            if score > best_score:
-                best_score = score
-                best_df = temp
-                best_info = f"{enc} / 자동 구분자 추론"
-
-            if score >= 3 and len(temp.columns) >= 3:
-                temp.attrs["read_info"] = f"{enc} / 자동 구분자 추론"
-                return temp
-
-        except Exception as e:
-            errors.append(f"{enc} / 자동 구분자 추론: {e}")
-
-    # 3차: 깨지는 줄은 건너뛰고 읽기
-    # 단, 이 경우 일부 행이 빠질 수 있으므로 최후 수단입니다.
-    for enc in encodings:
-        for sep, sep_name in separators:
-            try:
-                temp = pd.read_csv(
-                    file_path,
-                    encoding=enc,
-                    sep=sep,
-                    engine="python",
-                    dtype=str,
-                    on_bad_lines="skip"
-                )
-
-                temp.columns = (
-                    temp.columns.astype(str)
-                    .str.replace("\ufeff", "", regex=False)
-                    .str.replace("\n", "", regex=False)
-                    .str.replace("\r", "", regex=False)
-                    .str.strip()
-                )
-
-                score = column_score(temp)
-
-                if score > best_score:
-                    best_score = score
-                    best_df = temp
-                    best_info = f"{enc} / {sep_name} / 문제 행 건너뜀"
-
-            except Exception as e:
-                errors.append(f"{enc} / {sep_name} / skip: {e}")
-
-    if best_df is not None and len(best_df.columns) >= 2:
-        best_df.attrs["read_info"] = best_info
-        return best_df
-
-    raise ValueError(
-        "admission_results.csv를 읽을 수 없습니다. "
-        "파일이 실제 CSV 또는 탭 구분 텍스트인지 확인해 주세요. "
-        f"시도한 오류 목록: {errors[:5]}"
-    )
 
 
 # ---------------- 1. 데이터 불러오기 + 전처리 ----------------
 @st.cache_data
 def load_data():
-    # 1) CSV 불러오기
+    # 1) CSV 또는 탭 구분 파일 불러오기
     df = read_admission_file("admission_results.csv")
 
     # 2) 원본 컬럼명 기본 정리
@@ -322,8 +203,14 @@ def load_data():
     col_graduation = first_existing_column(df, ["졸업년도", "졸업연도"])
     col_middle = first_existing_column(df, ["출신중", "출신중학교"])
     col_name = first_existing_column(df, ["성명", "이름", "학생명"])
-    col_middle_grade = first_existing_column(df, ["내신(중)", "중학교내신", "중학교 내신", "중학교내신성적"])
-    col_high_grade = first_existing_column(df, ["내신(고)", "고교내신", "고교 내신", "고등학교내신", "고등학교 내신"])
+    col_middle_grade = first_existing_column(
+        df,
+        ["내신(중)", "중학교내신", "중학교 내신", "중학교내신성적"]
+    )
+    col_high_grade = first_existing_column(
+        df,
+        ["내신(고)", "고교내신", "고교 내신", "고등학교내신", "고등학교 내신"]
+    )
     col_middle_rank = first_existing_column(df, ["고입석차", "고입 석차"])
     col_high_rank = first_existing_column(df, ["고등학교석차", "고등학교 석차", "고등학교\n석차"])
 
@@ -395,11 +282,23 @@ def load_data():
         if not text:
             return result
 
-        # 여러 합격 결과가 쉼표로 연결되어 있으면 첫 번째를 대표값으로 사용
+        # 여러 합격 결과 중 첫 번째를 대표값으로 사용
         first = text.split(",")[0].strip()
 
-        # 기본 형태: 대학/전형/학과
-        parts = [p.strip() for p in first.split("/")]
+        # 2020~2025 자료 예: 대학/전형/학과
+        if "/" in first:
+            parts = [p.strip() for p in first.split("/")]
+
+        # 2026 자료 예: 대학 - 전형 - 학과
+        elif " - " in first:
+            parts = [p.strip() for p in first.split(" - ")]
+
+        # 하이픈 주변 공백이 불규칙한 경우
+        elif "-" in first:
+            parts = [p.strip() for p in first.split("-")]
+
+        else:
+            parts = [first]
 
         if len(parts) >= 1:
             uni_part = parts[0]
@@ -727,7 +626,7 @@ else:
     selected_middle = "전체"
 
 # 대표대학 필터
-# 중요: 기본값을 비워 두어, 아무 대학도 선택하지 않았을 때 전체가 보이게 합니다.
+# 기본값을 비워 두어, 아무 대학도 선택하지 않았을 때 전체가 보이게 합니다.
 if "대표대학" in df.columns:
     uni_counts = df["대표대학"].replace("", pd.NA).dropna().value_counts()
     university_options = uni_counts.index.tolist()
