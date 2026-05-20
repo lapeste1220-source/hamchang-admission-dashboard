@@ -649,6 +649,9 @@ def normalize_university_name(name):
 
     df["대표대학정규화"] = df["대표대학"].apply(normalize_university_name)
 
+    # 화면 표시와 집계도 표준 대학명으로 통일
+    df["대표대학"] = df["대표대학정규화"]
+
     capital_set = set([normalize_university_name(x) for x in CAPITAL_REGION_UNIS])
     national_set = set([normalize_university_name(x) for x in NATIONAL_UNIS])
     teacher_set = set([normalize_university_name(x) for x in TEACHER_UNIS])
