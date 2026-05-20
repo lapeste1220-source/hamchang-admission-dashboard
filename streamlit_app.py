@@ -810,8 +810,9 @@ if year_range and "졸업년도" in filtered.columns:
     ]
 
 # 출신중
-if selected_middle != "전체" and "출신중" in filtered.columns:
-    filtered = filtered[filtered["출신중"].astype(str) == selected_middle]
+# 선택한 중학교가 있을 때만 필터링
+if selected_middles and "출신중" in filtered.columns:
+    filtered = filtered[filtered["출신중"].astype(str).isin(selected_middles)]
 
 # 대표대학
 if selected_universities and "대표대학" in filtered.columns:
