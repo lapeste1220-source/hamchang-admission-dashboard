@@ -796,6 +796,10 @@ if st.sidebar.button("🔄 최신 데이터 다시 불러오기"):
 # ---------------- 데이터 로딩 ----------------
 try:
     df = load_data()
+
+    # 혹시 같은 이름의 컬럼이 중복 생성되었을 경우 첫 번째 컬럼만 남김
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+
 except Exception as e:
     st.error("데이터를 불러오는 중 오류가 발생했습니다.")
     st.exception(e)
@@ -806,9 +810,26 @@ except Exception as e:
 st.sidebar.header("검색 조건")
 
 # 졸업연도 범위
-if "졸업년도" in df.columns and df["졸업년도"].notna().any():
-    min_year = int(df["졸업년도"].min())
-    max_year = int(df["졸업년도"].max())
+if "졸업년도" in df.columns:
+    year_series = pd.to_numeric(df["졸업년도"], errors="coerce")
+
+    if year_series.notna().any():
+        min_year = int(year_series.min())
+        max_year = int(year_series.max())
+
+        year_range = st.sidebar.slider(
+            "졸업연도 범위",
+            min_value=min_year,
+            max_value=max_year,
+            value=(min_year, max_year),
+            step=1,
+        )
+    else:
+        year_range = None
+        st.sidebar.warning("졸업년도 값이 비어 있습니다.")
+else:
+    year_range = None
+    st.sidebar.warning("졸업년도 컬럼을 찾을 수 없습니다.")
 
     year_range = st.sidebar.slider(
         "졸업연도 범위",
