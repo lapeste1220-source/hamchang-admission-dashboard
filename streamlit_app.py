@@ -1,4 +1,5 @@
 import re
+import csv
 import streamlit as st
 import pandas as pd
 import altair as alt
@@ -31,6 +32,22 @@ def first_existing_column(df, candidates):
             return normalized_map[key]
 
     return None
+
+
+def get_series(df, col, default=""):
+    """
+    df[col]이 Series가 아니라 DataFrame으로 잡히는 경우에도 첫 번째 컬럼만 안전하게 반환.
+    중복 컬럼명 문제 방지용.
+    """
+    if col is None or col not in df.columns:
+        return pd.Series([default] * len(df), index=df.index)
+
+    value = df[col]
+
+    if isinstance(value, pd.DataFrame):
+        return value.iloc[:, 0]
+
+    return value
 
 
 def safe_to_numeric(series):
@@ -122,9 +139,13 @@ def read_admission_file(file_path):
         )
 
     # 헤더 처리
-    headers = [h.strip().strip('"').strip("'") for h in header_line.split(delimiter)]
+    try:
+        headers = next(csv.reader([header_line], delimiter=delimiter))
+    except Exception:
+        headers = header_line.split(delimiter)
+
     headers = [
-        h.replace("\ufeff", "").replace("\n", "").replace("\r", "").strip()
+        str(h).replace("\ufeff", "").replace("\n", "").replace("\r", "").strip().strip('"').strip("'")
         for h in headers
     ]
 
@@ -144,17 +165,21 @@ def read_admission_file(file_path):
     # 데이터 줄 처리
     rows = []
 
-    for line in data_lines:
-        if not line.strip():
+    reader = csv.reader(data_lines, delimiter=delimiter)
+
+    for parts in reader:
+        if not parts:
             continue
 
-        parts = line.split(delimiter)
+        if len(parts) == 1 and not str(parts[0]).strip():
+            continue
 
+        # 칸 수가 부족하면 빈칸으로 채움
         if len(parts) < col_count:
             parts = parts + [""] * (col_count - len(parts))
 
+        # 칸 수가 많으면 마지막 컬럼에 합침
         elif len(parts) > col_count:
-            # 뒤쪽 주요합격 내용에 구분자가 들어간 경우 마지막 컬럼으로 합침
             parts = parts[:col_count - 1] + [delimiter.join(parts[col_count - 1:])]
 
         cleaned = []
@@ -179,6 +204,9 @@ def read_admission_file(file_path):
         .str.replace("\r", "", regex=False)
         .str.strip()
     )
+
+    # 중복 컬럼명 제거
+    df = df.loc[:, ~df.columns.duplicated()].copy()
 
     df.attrs["read_info"] = (
         f"{used_encoding} / 직접 줄 단위 읽기 / "
@@ -304,6 +332,12 @@ def repair_offer_and_high_rank(df):
 def load_data():
     df = read_admission_file("admission_results.csv")
 
+    if df is None:
+        raise ValueError("데이터 파일을 읽지 못했습니다.")
+
+    # 중복 컬럼 제거
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+
     df.columns = (
         df.columns.astype(str)
         .str.replace("\ufeff", "", regex=False)
@@ -340,18 +374,18 @@ def load_data():
     col_admission_method = first_existing_column(df, ["전형방법", "전형 방법", "방법"])
 
     # 표준 컬럼 생성
-    df["졸업년도"] = df[col_graduation] if col_graduation else None
-    df["출신중"] = df[col_middle] if col_middle else None
-    df["성명"] = df[col_name] if col_name else None
-    df["중학교내신"] = df[col_middle_grade] if col_middle_grade else None
-    df["고교내신"] = df[col_high_grade] if col_high_grade else None
-    df["고입석차"] = df[col_middle_rank] if col_middle_rank else None
-    df["고등학교석차"] = df[col_high_rank] if col_high_rank else None
-    df["주요합격"] = df[col_offer] if col_offer else ""
+    df["졸업년도"] = get_series(df, col_graduation, None)
+    df["출신중"] = get_series(df, col_middle, "")
+    df["성명"] = get_series(df, col_name, "")
+    df["중학교내신"] = get_series(df, col_middle_grade, "")
+    df["고교내신"] = get_series(df, col_high_grade, "")
+    df["고입석차"] = get_series(df, col_middle_rank, "")
+    df["고등학교석차"] = get_series(df, col_high_rank, "")
+    df["주요합격"] = get_series(df, col_offer, "")
 
-    df["최종단계"] = df[col_final_stage] if col_final_stage else ""
-    df["전형명"] = df[col_admission_name] if col_admission_name else ""
-    df["전형방법"] = df[col_admission_method] if col_admission_method else ""
+    df["최종단계"] = get_series(df, col_final_stage, "")
+    df["전형명"] = get_series(df, col_admission_name, "")
+    df["전형방법"] = get_series(df, col_admission_method, "")
 
     # 주요합격 앞에 붙은 고등학교석차 숫자 복구
     df = repair_offer_and_high_rank(df)
@@ -492,6 +526,127 @@ def load_data():
 
     df["학과계열"] = df["대표학과"].apply(classify_major_group)
 
+    # 대학명 정규화
+    def normalize_university_name(name):
+        """
+        대학명 표준화 함수.
+        예:
+        서울대 → 서울대학교
+        경북대 → 경북대학교
+        대구대 → 대구대학교
+        대구교대 → 대구교육대학교
+        """
+
+        if not isinstance(name, str):
+            return ""
+
+        text = (
+            name.replace(" ", "")
+            .replace("　", "")
+            .replace("(서울)", "")
+            .replace("(경산)", "")
+            .replace("(대구)", "")
+            .replace("(경북)", "")
+            .replace("(부산)", "")
+            .replace("(천안)", "")
+            .replace("(글로벌)", "")
+            .strip()
+        )
+
+        alias_map = {
+            "서울대": "서울대학교",
+            "연세대": "연세대학교",
+            "고려대": "고려대학교",
+            "서강대": "서강대학교",
+            "성균관대": "성균관대학교",
+            "한양대": "한양대학교",
+            "중앙대": "중앙대학교",
+            "경희대": "경희대학교",
+            "한국외대": "한국외국어대학교",
+            "외대": "한국외국어대학교",
+            "서울시립대": "서울시립대학교",
+            "시립대": "서울시립대학교",
+            "건국대": "건국대학교",
+            "동국대": "동국대학교",
+            "홍익대": "홍익대학교",
+            "숭실대": "숭실대학교",
+
+            "경북대": "경북대학교",
+            "부산대": "부산대학교",
+            "전남대": "전남대학교",
+            "전북대": "전북대학교",
+            "충남대": "충남대학교",
+            "충북대": "충북대학교",
+            "강원대": "강원대학교",
+            "제주대": "제주대학교",
+            "경상국립대": "경상국립대학교",
+            "금오공대": "금오공과대학교",
+            "금오공과대": "금오공과대학교",
+            "서울과기대": "서울과학기술대학교",
+            "서울과학기술대": "서울과학기술대학교",
+            "교통대": "한국교통대학교",
+            "한국교통대": "한국교통대학교",
+            "군산대": "군산대학교",
+            "공주대": "공주대학교",
+            "안동대": "안동대학교",
+            "창원대": "창원대학교",
+            "부경대": "부경대학교",
+            "한국해양대": "한국해양대학교",
+            "목포대": "목포대학교",
+            "순천대": "순천대학교",
+            "한국교원대": "한국교원대학교",
+            "한국체대": "한국체육대학교",
+            "한국체육대": "한국체육대학교",
+
+            "영남대": "영남대학교",
+            "계명대": "계명대학교",
+            "대구대": "대구대학교",
+            "대구가톨릭대": "대구가톨릭대학교",
+            "대가대": "대구가톨릭대학교",
+            "대구한의대": "대구한의대학교",
+            "동국대WISE": "동국대학교WISE캠퍼스",
+            "동국대와이즈": "동국대학교WISE캠퍼스",
+            "동국대학교WISE": "동국대학교WISE캠퍼스",
+            "동양대": "동양대학교",
+            "경운대": "경운대학교",
+            "위덕대": "위덕대학교",
+            "김천대": "김천대학교",
+
+            "대구교대": "대구교육대학교",
+            "부산교대": "부산교육대학교",
+            "서울교대": "서울교육대학교",
+            "경인교대": "경인교육대학교",
+            "청주교대": "청주교육대학교",
+            "공주교대": "공주교육대학교",
+            "전주교대": "전주교육대학교",
+            "진주교대": "진주교육대학교",
+            "춘천교대": "춘천교육대학교",
+            "광주교대": "광주교육대학교",
+            "제주교대": "제주교육대학교",
+        }
+
+        if text in alias_map:
+            return alias_map[text]
+
+        if text.endswith("대학교"):
+            return text
+
+        if text.endswith("교육대"):
+            return text[:-1] + "학교"
+
+        if text.endswith("교대"):
+            return text
+
+        if text.endswith("대") and len(text) >= 3:
+            return text[:-1] + "대학교"
+
+        return text
+
+    df["대표대학정규화"] = df["대표대학"].apply(normalize_university_name)
+
+    # 화면 표시와 집계도 표준 대학명으로 통일
+    df["대표대학"] = df["대표대학정규화"]
+
     # 대학 그룹
     CAPITAL_REGION_UNIS = [
         "서울대학교", "연세대학교", "고려대학교",
@@ -517,140 +672,6 @@ def load_data():
         "청주교육대학교", "공주교육대학교", "전주교육대학교",
         "진주교육대학교", "제주교육대학교"
     ]
-
-def normalize_university_name(name):
-    """
-    대학명 표준화 함수.
-    예:
-    서울대 → 서울대학교
-    경북대 → 경북대학교
-    대구대 → 대구대학교
-    영남대 → 영남대학교
-    한국외대 → 한국외국어대학교
-    대구교대 → 대구교육대학교
-    """
-
-    if not isinstance(name, str):
-        return ""
-
-    text = (
-        name.replace(" ", "")
-        .replace("　", "")
-        .replace("(서울)", "")
-        .replace("(경산)", "")
-        .replace("(대구)", "")
-        .replace("(경북)", "")
-        .replace("(부산)", "")
-        .replace("(천안)", "")
-        .replace("(글로벌)", "")
-        .strip()
-    )
-
-    # 특수 약칭 처리
-    alias_map = {
-        "서울대": "서울대학교",
-        "연세대": "연세대학교",
-        "고려대": "고려대학교",
-        "서강대": "서강대학교",
-        "성균관대": "성균관대학교",
-        "한양대": "한양대학교",
-        "중앙대": "중앙대학교",
-        "경희대": "경희대학교",
-        "한국외대": "한국외국어대학교",
-        "외대": "한국외국어대학교",
-        "서울시립대": "서울시립대학교",
-        "시립대": "서울시립대학교",
-        "건국대": "건국대학교",
-        "동국대": "동국대학교",
-        "홍익대": "홍익대학교",
-        "숭실대": "숭실대학교",
-
-        "경북대": "경북대학교",
-        "부산대": "부산대학교",
-        "전남대": "전남대학교",
-        "전북대": "전북대학교",
-        "충남대": "충남대학교",
-        "충북대": "충북대학교",
-        "강원대": "강원대학교",
-        "제주대": "제주대학교",
-        "경상국립대": "경상국립대학교",
-        "금오공대": "금오공과대학교",
-        "금오공과대": "금오공과대학교",
-        "서울과기대": "서울과학기술대학교",
-        "서울과학기술대": "서울과학기술대학교",
-        "교통대": "한국교통대학교",
-        "한국교통대": "한국교통대학교",
-        "군산대": "군산대학교",
-        "공주대": "공주대학교",
-        "안동대": "안동대학교",
-        "창원대": "창원대학교",
-        "부경대": "부경대학교",
-        "한국해양대": "한국해양대학교",
-        "목포대": "목포대학교",
-        "순천대": "순천대학교",
-        "한국교원대": "한국교원대학교",
-        "한국체대": "한국체육대학교",
-        "한국체육대": "한국체육대학교",
-
-        "영남대": "영남대학교",
-        "계명대": "계명대학교",
-        "대구대": "대구대학교",
-        "대구가톨릭대": "대구가톨릭대학교",
-        "대가대": "대구가톨릭대학교",
-        "대구한의대": "대구한의대학교",
-        "동국대WISE": "동국대학교WISE캠퍼스",
-        "동국대와이즈": "동국대학교WISE캠퍼스",
-        "동국대학교WISE": "동국대학교WISE캠퍼스",
-        "동양대": "동양대학교",
-        "경운대": "경운대학교",
-        "위덕대": "위덕대학교",
-        "김천대": "김천대학교",
-        "대구교대": "대구교육대학교",
-        "부산교대": "부산교육대학교",
-        "서울교대": "서울교육대학교",
-        "경인교대": "경인교육대학교",
-        "청주교대": "청주교육대학교",
-        "공주교대": "공주교육대학교",
-        "전주교대": "전주교육대학교",
-        "진주교대": "진주교육대학교",
-        "춘천교대": "춘천교육대학교",
-        "광주교대": "광주교육대학교",
-        "제주교대": "제주교육대학교",
-    }
-
-    if text in alias_map:
-        return alias_map[text]
-
-    # 이미 '대학교'로 끝나면 그대로 사용
-    if text.endswith("대학교"):
-        return text
-
-    # '교육대' → '교육대학교'
-    if text.endswith("교육대"):
-        return text[:-1] + "학교"
-
-    # '교대'는 교육대학교로 바꾸기 어렵지만, 자주 쓰는 약칭은 위 alias_map에서 처리
-    if text.endswith("교대"):
-        return text
-
-    # 일반적인 '~대' → '~대학교'
-    # 예: 영남대 → 영남대학교, 대구대 → 대구대학교
-    if text.endswith("대") and len(text) >= 3:
-        return text[:-1] + "대학교"
-
-    return text
-
-    # 이미 '서울대학교'처럼 되어 있으면 그대로 사용
-    if text.endswith("대학교"):
-        return text
-
-    # '경희대'처럼 alias_map에 없는 '○○대'는 일단 그대로 둠
-    return text
-
-    df["대표대학정규화"] = df["대표대학"].apply(normalize_university_name)
-
-    # 화면 표시와 집계도 표준 대학명으로 통일
-    df["대표대학"] = df["대표대학정규화"]
 
     capital_set = set([normalize_university_name(x) for x in CAPITAL_REGION_UNIS])
     national_set = set([normalize_university_name(x) for x in NATIONAL_UNIS])
@@ -797,7 +818,9 @@ if st.sidebar.button("🔄 최신 데이터 다시 불러오기"):
 try:
     df = load_data()
 
-    # 혹시 같은 이름의 컬럼이 중복 생성되었을 경우 첫 번째 컬럼만 남김
+    if df is None:
+        raise ValueError("load_data()가 데이터를 반환하지 못했습니다.")
+
     df = df.loc[:, ~df.columns.duplicated()].copy()
 
 except Exception as e:
@@ -808,6 +831,7 @@ except Exception as e:
 
 # ---------------- 사이드바: 검색 조건 ----------------
 st.sidebar.header("검색 조건")
+
 
 # 졸업연도 범위
 if "졸업년도" in df.columns:
@@ -831,8 +855,8 @@ else:
     year_range = None
     st.sidebar.warning("졸업년도 컬럼을 찾을 수 없습니다.")
 
+
 # 출신 중학교
-# 여러 중학교를 선택할 수 있도록 multiselect로 변경
 if "출신중" in df.columns:
     middle_options = sorted(df["출신중"].dropna().astype(str).unique().tolist())
 
@@ -844,6 +868,7 @@ if "출신중" in df.columns:
     )
 else:
     selected_middles = []
+
 
 # 대표대학 필터
 if "대표대학" in df.columns:
@@ -858,6 +883,7 @@ if "대표대학" in df.columns:
     )
 else:
     selected_universities = []
+
 
 # 고교 내신
 if "고교내신" in df.columns and df["고교내신"].notna().any():
@@ -874,6 +900,7 @@ if "고교내신" in df.columns and df["고교내신"].notna().any():
 else:
     grade_range = None
 
+
 # 중학교 내신
 if "중학교내신" in df.columns and df["중학교내신"].notna().any():
     min_middle_grade = float(df["중학교내신"].min())
@@ -889,6 +916,7 @@ if "중학교내신" in df.columns and df["중학교내신"].notna().any():
 else:
     middle_grade_range = None
 
+
 # 전형 대분류
 if "전형대분류" in df.columns:
     type_options = ["전체"] + sorted(df["전형대분류"].dropna().astype(str).unique().tolist())
@@ -896,12 +924,14 @@ if "전형대분류" in df.columns:
 else:
     selected_type = "전체"
 
+
 # 학과 계열
 if "학과계열" in df.columns:
     major_group_options = ["전체"] + sorted(df["학과계열"].dropna().astype(str).unique().tolist())
     selected_major_group = st.sidebar.selectbox("학과 계열", major_group_options)
 else:
     selected_major_group = "전체"
+
 
 # 의치약한수 세부 선택
 med_view_option = st.sidebar.selectbox(
@@ -917,12 +947,14 @@ med_view_option = st.sidebar.selectbox(
     ],
 )
 
+
 # 대학/전형/학과 키워드
 keyword = st.sidebar.text_input(
     "대학/전형/학과 키워드",
     value="",
     placeholder="예: 경북대, 간호, 교대, 농어촌, 정시",
 )
+
 
 # 대학/전형 그룹 필터
 st.sidebar.markdown("### 대학/전형 그룹 필터")
@@ -943,7 +975,6 @@ if year_range and "졸업년도" in filtered.columns:
     ]
 
 # 출신중
-# 선택한 중학교가 있을 때만 필터링
 if selected_middles and "출신중" in filtered.columns:
     filtered = filtered[filtered["출신중"].astype(str).isin(selected_middles)]
 
