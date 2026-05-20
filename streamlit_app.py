@@ -831,17 +831,6 @@ else:
     year_range = None
     st.sidebar.warning("졸업년도 컬럼을 찾을 수 없습니다.")
 
-    year_range = st.sidebar.slider(
-        "졸업연도 범위",
-        min_value=min_year,
-        max_value=max_year,
-        value=(min_year, max_year),
-        step=1,
-    )
-else:
-    year_range = None
-    st.sidebar.warning("졸업년도 컬럼을 찾을 수 없습니다.")
-
 # 출신 중학교
 # 여러 중학교를 선택할 수 있도록 multiselect로 변경
 if "출신중" in df.columns:
