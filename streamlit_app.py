@@ -699,11 +699,18 @@ else:
     st.sidebar.warning("졸업년도 컬럼을 찾을 수 없습니다.")
 
 # 출신 중학교
+# 여러 중학교를 선택할 수 있도록 multiselect로 변경
 if "출신중" in df.columns:
-    middle_options = ["전체"] + sorted(df["출신중"].dropna().astype(str).unique().tolist())
-    selected_middle = st.sidebar.selectbox("출신 중학교", middle_options)
+    middle_options = sorted(df["출신중"].dropna().astype(str).unique().tolist())
+
+    selected_middles = st.sidebar.multiselect(
+        "출신 중학교",
+        options=middle_options,
+        default=[],
+        help="선택하지 않으면 전체 중학교를 보여줍니다. 여러 중학교를 동시에 선택할 수 있습니다.",
+    )
 else:
-    selected_middle = "전체"
+    selected_middles = []
 
 # 대표대학 필터
 if "대표대학" in df.columns:
